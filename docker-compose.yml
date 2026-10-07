@@ -1,0 +1,218 @@
+# Full local stack: services + infrastructure + observability.
+#
+#   docker compose up -d --build
+#
+# Needs ~6 GB of RAM for Docker (Elasticsearch, Kafka and the JVM-based tools are the heavy ones).
+# Infrastructure only (to run the services from the IDE with `dotnet run`):
+#
+#   docker compose up -d postgres redis kafka otel-collector jaeger prometheus grafana elasticsearch logstash kibana
+
+name: reference-architecture
+
+x-dotnet-service: &dotnet-service
+  restart: unless-stopped
+  environment: &dotnet-environment
+    ASPNETCORE_ENVIRONMENT: Development
+    Kafka__BootstrapServers: kafka:9092
+    Database__MigrateOnStartup: "true"
+    OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+    Logstash__Url: http://logstash:8080
+
+services:
+  # ---------------------------------------------------------------- services
+  catalog-api:
+    <<: *dotnet-service
+    image: reference-architecture/catalog-api:dev
+    build:
+      context: .
+      dockerfile: src/Services/Catalog/Catalog.Api/Dockerfile
+    environment:
+      <<: *dotnet-environment
+      Service__Name: catalog-api
+      ConnectionStrings__CatalogDb: Host=postgres;Port=5432;Database=catalog;Username=postgres;Password=postgres
+      ConnectionStrings__Redis: redis:6379
+    ports:
+      - "5101:8080"
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      kafka: { condition: service_healthy }
+
+  ordering-api:
+    <<: *dotnet-service
+    image: reference-architecture/ordering-api:dev
+    build:
+      context: .
+      dockerfile: src/Services/Ordering/Ordering.Api/Dockerfile
+    environment:
+      <<: *dotnet-environment
+      Service__Name: ordering-api
+      ConnectionStrings__OrderingDb: Host=postgres;Port=5432;Database=ordering;Username=postgres;Password=postgres
+      Services__Catalog__BaseUrl: http://catalog-api:8080
+    ports:
+      - "5102:8080"
+    depends_on:
+      postgres: { condition: service_healthy }
+      kafka: { condition: service_healthy }
+      catalog-api: { condition: service_started }
+
+  # ---------------------------------------------------------- infrastructure
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./deploy/docker/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7.4-alpine
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # Single-node Kafka in KRaft mode (no ZooKeeper).
+  kafka:
+    image: apache/kafka:3.8.0
+    restart: unless-stopped
+    ports:
+      - "29092:29092"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093,PLAINTEXT_HOST://:29092
+      # Containers reach the broker as kafka:9092; the host (dotnet run) as localhost:29092.
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_NUM_PARTITIONS: 3
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 > /dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui:v0.7.2
+    restart: unless-stopped
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+    ports:
+      - "8085:8080"
+    depends_on:
+      kafka: { condition: service_healthy }
+
+  # ----------------------------------------------------------- observability
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.111.0
+    restart: unless-stopped
+    volumes:
+      - ./deploy/observability/otel-collector/config.yaml:/etc/otelcol-contrib/config.yaml:ro
+    ports:
+      - "4317:4317"   # OTLP gRPC
+      - "4318:4318"   # OTLP HTTP
+      - "8889:8889"   # Prometheus exporter (scraped by Prometheus)
+    depends_on:
+      - jaeger
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.62.0
+    restart: unless-stopped
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "16686:16686" # UI
+
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=7d
+    volumes:
+      - ./deploy/observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+
+  grafana:
+    image: grafana/grafana:11.2.2
+    restart: unless-stopped
+    environment:
+      # Local demo only: anonymous admin, no login screen.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+    volumes:
+      - ./deploy/observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./deploy/observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+      - jaeger
+      - elasticsearch
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.15.3
+    restart: unless-stopped
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: "false"   # local demo only
+      ES_JAVA_OPTS: -Xms512m -Xmx512m
+    volumes:
+      - elasticsearch-data:/usr/share/elasticsearch/data
+    ports:
+      - "9200:9200"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:9200/_cluster/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+  logstash:
+    image: docker.elastic.co/logstash/logstash:8.15.3
+    restart: unless-stopped
+    environment:
+      LS_JAVA_OPTS: -Xms256m -Xmx256m
+    volumes:
+      - ./deploy/observability/logstash/config/logstash.yml:/usr/share/logstash/config/logstash.yml:ro
+      - ./deploy/observability/logstash/pipeline:/usr/share/logstash/pipeline:ro
+    ports:
+      - "8081:8080"   # HTTP input used by the Serilog sink
+    depends_on:
+      elasticsearch: { condition: service_healthy }
+
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.15.3
+    restart: unless-stopped
+    environment:
+      ELASTICSEARCH_HOSTS: http://elasticsearch:9200
+    ports:
+      - "5601:5601"
+    depends_on:
+      elasticsearch: { condition: service_healthy }
+
+volumes:
+  postgres-data:
+  elasticsearch-data:

@@ -1,0 +1,23 @@
+# Azure Event Hubs exposes a Kafka-compatible endpoint on port 9093 (SASL_SSL + PLAIN, where the
+# username is the literal "$ConnectionString" and the password is the connection string itself,
+# injected from Key Vault as Kafka__Properties__sasl.password).
+# Event hubs (topics) are provisioned as infrastructure-as-code, so topic auto-creation is off.
+- op: replace
+  path: /data/Kafka__BootstrapServers
+  value: <EVENT_HUBS_NAMESPACE>.servicebus.windows.net:9093
+- op: add
+  path: /data/Kafka__CreateTopics
+  value: "false"
+- op: add
+  path: /data/Kafka__Properties__security.protocol
+  value: SASL_SSL
+- op: add
+  path: /data/Kafka__Properties__sasl.mechanism
+  value: PLAIN
+- op: add
+  path: /data/Kafka__Properties__sasl.username
+  value: $ConnectionString
+# Telemetry goes to an in-cluster OpenTelemetry Collector that forwards to Azure Monitor / Grafana.
+- op: replace
+  path: /data/OTEL_EXPORTER_OTLP_ENDPOINT
+  value: http://otel-collector.observability.svc.cluster.local:4317

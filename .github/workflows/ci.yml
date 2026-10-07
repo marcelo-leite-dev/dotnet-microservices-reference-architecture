@@ -1,0 +1,170 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DOTNET_NOLOGO: true
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: true
+
+jobs:
+  # ------------------------------------------------------------------ fast feedback
+  build-and-unit-test:
+    name: Build, unit and architecture tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      - uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ hashFiles('Directory.Packages.props', '**/*.csproj') }}
+          restore-keys: nuget-${{ runner.os }}-
+
+      - name: Restore
+        run: dotnet restore ReferenceArchitecture.sln
+
+      - name: Build (warnings as errors)
+        run: dotnet build ReferenceArchitecture.sln --configuration Release --no-restore
+
+      - name: Unit and architecture tests
+        run: >
+          dotnet test ReferenceArchitecture.sln
+          --configuration Release --no-build
+          --filter "Category!=Integration"
+          --logger trx
+          --collect:"XPlat Code Coverage"
+          --results-directory TestResults/unit
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unit-test-results
+          path: TestResults/unit
+
+  # ------------------------------------------------- real infrastructure (Docker)
+  integration-test:
+    name: Integration tests (Testcontainers)
+    runs-on: ubuntu-latest   # Docker is preinstalled on GitHub-hosted Linux runners
+    needs: build-and-unit-test
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      - uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ hashFiles('Directory.Packages.props', '**/*.csproj') }}
+          restore-keys: nuget-${{ runner.os }}-
+
+      - name: Integration tests
+        run: >
+          dotnet test ReferenceArchitecture.sln
+          --configuration Release
+          --filter "Category=Integration"
+          --logger trx
+          --collect:"XPlat Code Coverage"
+          --results-directory TestResults/integration
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: integration-test-results
+          path: TestResults/integration
+
+  # ------------------------------------------------------- manifests and compose
+  validate-deployment-manifests:
+    name: Validate Kubernetes manifests and Compose file
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      KUBECONFORM_VERSION: v0.6.7
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install kubeconform
+        run: |
+          curl -sSL "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz" \
+            | tar -xz -C /usr/local/bin kubeconform
+
+      - name: Render and validate overlays
+        run: |
+          for overlay in deploy/k8s/overlays/*/; do
+            echo "::group::$overlay"
+            kubectl kustomize "$overlay" > rendered.yaml
+            # CRDs such as SecretProviderClass have no built-in schema.
+            kubeconform -strict -summary -ignore-missing-schemas -kubernetes-version 1.30.0 rendered.yaml
+            echo "::endgroup::"
+          done
+
+      - name: Validate docker-compose.yml
+        run: docker compose -f docker-compose.yml config --quiet
+
+  # --------------------------------------------------------------- container images
+  publish-images:
+    name: Publish image (${{ matrix.service }})
+    runs-on: ubuntu-latest
+    needs: [build-and-unit-test, integration-test, validate-deployment-manifests]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [catalog, ordering]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/${{ matrix.service }}-api
+          tags: |
+            type=sha,format=long,prefix=
+            type=raw,value=latest
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: src/Services/${{ matrix.service == 'catalog' && 'Catalog/Catalog.Api' || 'Ordering/Ordering.Api' }}/Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ matrix.service }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service }}
+          provenance: true
+          sbom: true

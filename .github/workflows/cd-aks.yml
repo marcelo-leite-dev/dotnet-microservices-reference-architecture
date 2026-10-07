@@ -1,0 +1,94 @@
+# Continuous delivery to Azure Kubernetes Service.
+#
+# Runs after a successful CI run on main (which published the images tagged with the commit SHA),
+# or manually with an explicit image tag. Authenticates to Azure with OpenID Connect: no long-lived
+# credentials are stored in GitHub.
+#
+# One-time setup (repository/environment settings):
+#   Secrets:   AZURE_CLIENT_ID, AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID
+#   Variables: AKS_RESOURCE_GROUP, AKS_CLUSTER_NAME
+#   Environment "production" with required reviewers (manual approval gate).
+name: CD - AKS
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      image-tag:
+        description: Image tag to deploy (commit SHA)
+        required: true
+
+permissions:
+  contents: read
+  id-token: write   # OIDC token for azure/login
+
+concurrency:
+  group: cd-aks
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy to AKS
+    runs-on: ubuntu-latest
+    # Skip when CI failed, and on forks / repos where AKS is not configured.
+    if: >
+      vars.AKS_CLUSTER_NAME != '' &&
+      (github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success')
+    environment:
+      name: production
+    timeout-minutes: 20
+    env:
+      IMAGE_TAG: ${{ github.event.inputs.image-tag || github.event.workflow_run.head_sha }}
+      OVERLAY: deploy/k8s/overlays/aks
+      NAMESPACE: reference-architecture
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - uses: azure/use-kubelogin@v1
+        with:
+          kubelogin-version: v0.1.4
+
+      - uses: azure/aks-set-context@v4
+        with:
+          resource-group: ${{ vars.AKS_RESOURCE_GROUP }}
+          cluster-name: ${{ vars.AKS_CLUSTER_NAME }}
+          admin: false
+          use-kubelogin: true
+
+      - uses: imranismail/setup-kustomize@v2
+
+      - name: Pin image versions
+        working-directory: ${{ env.OVERLAY }}
+        run: |
+          owner="$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
+          kustomize edit set image \
+            "catalog-api=ghcr.io/${owner}/catalog-api:${IMAGE_TAG}" \
+            "ordering-api=ghcr.io/${owner}/ordering-api:${IMAGE_TAG}"
+
+      - name: Server-side dry run
+        run: kubectl apply -k "$OVERLAY" --dry-run=server
+
+      - name: Apply
+        run: kubectl apply -k "$OVERLAY"
+
+      - name: Wait for rollout
+        run: |
+          kubectl rollout status deployment/catalog-api -n "$NAMESPACE" --timeout=5m
+          kubectl rollout status deployment/ordering-api -n "$NAMESPACE" --timeout=5m
+
+      - name: Roll back on failure
+        if: failure()
+        run: |
+          kubectl rollout undo deployment/catalog-api -n "$NAMESPACE" || true
+          kubectl rollout undo deployment/ordering-api -n "$NAMESPACE" || true

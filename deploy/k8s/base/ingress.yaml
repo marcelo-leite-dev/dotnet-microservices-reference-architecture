@@ -1,0 +1,24 @@
+# Path-based routing: each service owns a distinct /api/* prefix, so no URL rewriting is needed.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: reference-architecture
+spec:
+  ingressClassName: nginx
+  rules:
+    - http:
+        paths:
+          - path: /api/products
+            pathType: Prefix
+            backend:
+              service:
+                name: catalog-api
+                port:
+                  name: http
+          - path: /api/orders
+            pathType: Prefix
+            backend:
+              service:
+                name: ordering-api
+                port:
+                  name: http

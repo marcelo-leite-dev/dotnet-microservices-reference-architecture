@@ -1,0 +1,31 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: reference-architecture
+  annotations:
+    # TLS certificate from Key Vault, served by the application routing add-on.
+    kubernetes.azure.com/tls-cert-keyvault-uri: https://<KEY_VAULT_NAME>.vault.azure.net/certificates/<CERTIFICATE_NAME>
+spec:
+  ingressClassName: webapprouting.kubernetes.azure.com
+  tls:
+    - hosts:
+        - <PUBLIC_HOSTNAME>
+      secretName: keyvault-reference-architecture
+  rules:
+    - host: <PUBLIC_HOSTNAME>
+      http:
+        paths:
+          - path: /api/products
+            pathType: Prefix
+            backend:
+              service:
+                name: catalog-api
+                port:
+                  name: http
+          - path: /api/orders
+            pathType: Prefix
+            backend:
+              service:
+                name: ordering-api
+                port:
+                  name: http

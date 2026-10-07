@@ -1,0 +1,26 @@
+version: 2
+updates:
+  - package-ecosystem: nuget
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+    groups:
+      opentelemetry:
+        patterns: ["OpenTelemetry*", "Npgsql.OpenTelemetry"]
+      entity-framework:
+        patterns: ["Microsoft.EntityFrameworkCore*", "Npgsql.EntityFrameworkCore*", "EFCore.*"]
+      testing:
+        patterns: ["xunit*", "Microsoft.NET.Test.Sdk", "coverlet*", "NSubstitute", "Testcontainers*"]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: docker
+    directories:
+      - /src/Services/Catalog/Catalog.Api
+      - /src/Services/Ordering/Ordering.Api
+    schedule:
+      interval: weekly

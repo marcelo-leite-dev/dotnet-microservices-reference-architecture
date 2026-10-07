@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: reference-architecture
+  labels:
+    # Enforce the "restricted" Pod Security Standard: non-root, no privilege escalation, ...
+    pod-security.kubernetes.io/enforce: restricted

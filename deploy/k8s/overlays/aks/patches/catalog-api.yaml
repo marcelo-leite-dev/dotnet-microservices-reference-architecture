@@ -1,0 +1,47 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: catalog-api
+  annotations:
+    azure.workload.identity/client-id: <CATALOG_API_MANAGED_IDENTITY_CLIENT_ID>
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: catalog-api
+spec:
+  replicas: 3
+  template:
+    metadata:
+      labels:
+        azure.workload.identity/use: "true"
+    spec:
+      # Workload Identity needs the projected service account token.
+      automountServiceAccountToken: true
+      containers:
+        - name: api
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              memory: 768Mi
+          volumeMounts:
+            - name: secrets-store
+              mountPath: /mnt/secrets-store
+              readOnly: true
+      volumes:
+        - name: secrets-store
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: catalog-api-secrets
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: catalog-api
+spec:
+  minReplicas: 3
+  maxReplicas: 10

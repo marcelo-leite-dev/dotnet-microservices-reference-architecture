@@ -1,0 +1,36 @@
+# Azure Kubernetes Service. Stateful dependencies are managed Azure services, not pods:
+#
+#   PostgreSQL -> Azure Database for PostgreSQL – Flexible Server
+#   Redis      -> Azure Cache for Redis
+#   Kafka      -> Azure Event Hubs (Kafka endpoint)
+#   Secrets    -> Azure Key Vault, mounted via the Secrets Store CSI driver + Workload Identity
+#   Ingress    -> AKS application routing add-on (managed NGINX)
+#
+# Placeholders in <ANGLE_BRACKETS> are environment-specific (see docs and the CD workflow).
+# The image tag is set by the CD pipeline: `kustomize edit set image ...`.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: reference-architecture
+
+resources:
+  - ../../base
+  - secret-provider-class.yaml
+
+images:
+  - name: catalog-api
+    newName: ghcr.io/<GITHUB_OWNER>/catalog-api
+    newTag: latest
+  - name: ordering-api
+    newName: ghcr.io/<GITHUB_OWNER>/ordering-api
+    newTag: latest
+
+patches:
+  - path: patches/catalog-api.yaml
+  - path: patches/ordering-api.yaml
+  - path: patches/ingress.yaml
+  # Event Hubs settings shared by both services.
+  - target:
+      kind: ConfigMap
+      name: (catalog|ordering)-api-config
+    path: patches/event-hubs-config.yaml

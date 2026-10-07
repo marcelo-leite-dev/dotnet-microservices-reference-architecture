@@ -1,0 +1,17 @@
+# Environment-agnostic manifests for the application services.
+# Environments (local, aks) are overlays that add infrastructure, secrets, images and tuning.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: reference-architecture
+
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: reference-architecture
+    includeSelectors: false
+
+resources:
+  - namespace.yaml
+  - catalog-api.yaml
+  - ordering-api.yaml
+  - ingress.yaml

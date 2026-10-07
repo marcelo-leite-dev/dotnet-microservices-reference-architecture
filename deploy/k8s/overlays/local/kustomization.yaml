@@ -1,0 +1,67 @@
+# Local cluster (kind, minikube, Docker Desktop): services + in-cluster infrastructure.
+#
+#   docker build -t catalog-api:dev  -f src/Services/Catalog/Catalog.Api/Dockerfile .
+#   docker build -t ordering-api:dev -f src/Services/Ordering/Ordering.Api/Dockerfile .
+#   kind load docker-image catalog-api:dev ordering-api:dev     # kind only
+#   kubectl apply -k deploy/k8s/overlays/local
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: reference-architecture
+
+resources:
+  - ../../base
+  - infrastructure.yaml
+
+images:
+  - name: catalog-api
+    newName: catalog-api
+    newTag: dev
+  - name: ordering-api
+    newName: ordering-api
+    newTag: dev
+
+# Development-only credentials. Real environments never keep secrets in Git (see the aks overlay).
+secretGenerator:
+  - name: catalog-api-secrets
+    literals:
+      - ConnectionStrings__CatalogDb=Host=postgres;Port=5432;Database=catalog;Username=postgres;Password=postgres
+      - ConnectionStrings__Redis=redis:6379
+  - name: ordering-api-secrets
+    literals:
+      - ConnectionStrings__OrderingDb=Host=postgres;Port=5432;Database=ordering;Username=postgres;Password=postgres
+  - name: postgres-credentials
+    literals:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+
+patches:
+  # Third-party infrastructure images (postgres, kafka) need the "baseline" policy locally.
+  - target:
+      kind: Namespace
+      name: reference-architecture
+    patch: |-
+      - op: replace
+        path: /metadata/labels/pod-security.kubernetes.io~1enforce
+        value: baseline
+  # One replica per service is enough on a laptop.
+  - target:
+      kind: HorizontalPodAutoscaler
+    patch: |-
+      - op: replace
+        path: /spec/minReplicas
+        value: 1
+  - target:
+      kind: Deployment
+      labelSelector: app.kubernetes.io/component=api
+    patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 1
+  - target:
+      kind: ConfigMap
+      name: (catalog|ordering)-api-config
+    patch: |-
+      - op: replace
+        path: /data/ASPNETCORE_ENVIRONMENT
+        value: Development
