@@ -22,7 +22,7 @@
   </ItemGroup>
 
   <ItemGroup Label="Messaging">
-    <PackageVersion Include="Confluent.Kafka" Version="2.15.1" />
+    <PackageVersion Include="Confluent.Kafka" Version="2.16.0" />
   </ItemGroup>
 
   <ItemGroup Label="Application">
